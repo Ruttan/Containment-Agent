@@ -1,0 +1,94 @@
+# ============================================================
+# Containment Agent Configuration
+# Fill in your values below. Lines starting with # are comments.
+# ============================================================
+
+# Which platform to use for host isolation.
+# Options: "crowdstrike" | "tanium" | "generic"
+platform: crowdstrike
+
+# Your Anthropic API key (used for AI alert evaluation).
+# Get one at: https://console.anthropic.com
+anthropic_api_key: "YOUR_ANTHROPIC_API_KEY"
+
+# ============================================================
+# PLATFORM CREDENTIALS
+# Only fill in the section matching your chosen platform above.
+# ============================================================
+
+platforms:
+
+  crowdstrike:
+    # OAuth2 credentials from your CrowdStrike API client
+    client_id: "YOUR_CS_CLIENT_ID"
+    client_secret: "YOUR_CS_CLIENT_SECRET"
+    # Your CrowdStrike API base URL (region-specific)
+    base_url: "https://api.crowdstrike.com"
+
+  tanium:
+    # API token from your Tanium console (Settings > API Tokens)
+    api_token: "YOUR_TANIUM_API_TOKEN"
+    # Your Tanium server URL
+    base_url: "https://your-tanium-server.example.com"
+
+  generic:
+    # For custom platforms: agent will POST to this URL with
+    # {"host_id": "...", "action": "isolate"}
+    isolation_endpoint: "https://your-platform/api/isolate"
+    api_key: "YOUR_API_KEY"
+    api_key_header: "Authorization"
+
+# ============================================================
+# NOTIFICATIONS
+# Both email and Slack will receive the approval request.
+# ============================================================
+
+notifications:
+
+  slack:
+    # Slack incoming webhook URL.
+    # Create one at: https://api.slack.com/messaging/webhooks
+    webhook_url: "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
+
+  email:
+    smtp_host: "smtp.gmail.com"
+    smtp_port: 587
+    # Your sending email address
+    username: "your-email@gmail.com"
+    # For Gmail, use an App Password — not your real password.
+    # Create one at: myaccount.google.com/apppasswords
+    password: "YOUR_APP_PASSWORD"
+    from_address: "your-email@gmail.com"
+    # List of recipients (can be more than one)
+    to_addresses:
+      - "analyst@yourcompany.com"
+
+# ============================================================
+# SERVER SETTINGS
+# The agent runs a small web server to receive alerts and approvals.
+# ============================================================
+
+server:
+  host: "0.0.0.0"
+  port: 5000
+  # Public URL used in approve/deny links.
+  # For local testing use localhost.
+  # In production, replace with your real server URL or ngrok URL.
+  public_url: "http://localhost:5000"
+
+# ============================================================
+# AGENT BEHAVIOR
+# ============================================================
+
+agent:
+  # Minimum AI-assessed severity to send a notification.
+  # Options: "low" | "medium" | "high" | "critical"
+  # Alerts below this threshold are logged only — no notification sent.
+  min_severity_to_notify: "medium"
+
+  # Minutes before a pending approval expires automatically.
+  approval_timeout_minutes: 30
+
+  # Log all agent actions to a file
+  log_to_file: true
+  log_file: "agent.log"
