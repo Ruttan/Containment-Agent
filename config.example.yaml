@@ -3,20 +3,55 @@
 # Fill in your values below. Lines starting with # are comments.
 # ============================================================
 
-# Which platform to use for host isolation.
-# Options: "crowdstrike" | "tanium" | "generic"
-platform: crowdstrike
-
 # Your Anthropic API key (used for AI alert evaluation).
 # Get one at: https://console.anthropic.com
 anthropic_api_key: "YOUR_ANTHROPIC_API_KEY"
 
 # ============================================================
+# ALERT SOURCES (multi-source, configurable)
+# Each entry defines one incoming alert source and which connector
+# handles its response actions (isolate/kill_process/quarantine_file/block_hash).
+# The source name becomes the webhook path: POST /webhook/alert/<source name>
+#
+# You can enable as many sources as you want at once — e.g. Defender for
+# Endpoint AND CrowdStrike AND Tanium simultaneously, each posting to its
+# own path. `connector` picks which adapter in connectors/ handles it;
+# it defaults to the source name if omitted.
+# ============================================================
+
+sources:
+
+  defender_endpoint:
+    connector: defender   # POST alerts here: /webhook/alert/defender_endpoint
+
+  m365_defender:
+    connector: defender   # unified M365 Defender alerts, same Graph-based connector
+                          # POST alerts here: /webhook/alert/m365_defender
+
+  crowdstrike:
+    connector: crowdstrike   # POST alerts here: /webhook/alert/crowdstrike
+
+  tanium:
+    connector: tanium        # POST alerts here: /webhook/alert/tanium
+
+  # generic:
+  #   connector: generic     # POST alerts here: /webhook/alert/generic
+
+# ============================================================
 # PLATFORM CREDENTIALS
-# Only fill in the section matching your chosen platform above.
+# Fill in credentials only for the platforms you enabled above under `sources`.
 # ============================================================
 
 platforms:
+
+  defender:
+    # Azure AD app registration used for Microsoft Graph Security API calls.
+    # Needs Application permissions (admin-consented) for machine isolation,
+    # file quarantine, and threat indicator management — see
+    # connectors/defender.py for the specific permission names.
+    tenant_id: "YOUR_AZURE_TENANT_ID"
+    client_id: "YOUR_APP_REGISTRATION_CLIENT_ID"
+    client_secret: "YOUR_APP_REGISTRATION_CLIENT_SECRET"
 
   crowdstrike:
     # OAuth2 credentials from your CrowdStrike API client
@@ -33,7 +68,8 @@ platforms:
 
   generic:
     # For custom platforms: agent will POST to this URL with
-    # {"host_id": "...", "action": "isolate"}
+    # {"host_id": "...", "action": "isolate"} (and similar payloads for
+    # kill_process / quarantine_file / block_hash — see connectors/generic.py)
     isolation_endpoint: "https://your-platform/api/isolate"
     api_key: "YOUR_API_KEY"
     api_key_header: "Authorization"

@@ -52,3 +52,33 @@ class GenericConnector(BaseConnector):
             "os": "unknown",
             "last_seen": "unknown",
         }
+
+    # ------------------------------------------------------------------
+    # Optional response actions
+    # All POST to the same configurable endpoint with a different
+    # "action" value — your receiving service decides what to do with it.
+    # ------------------------------------------------------------------
+
+    def _post_action(self, payload: dict, action_name: str) -> dict:
+        try:
+            resp = requests.post(self.endpoint, json=payload, headers=self._headers())
+            resp.raise_for_status()
+            return {
+                "success": True,
+                "message": f"{action_name} request sent.",
+                "raw_response": resp.json() if resp.content else {},
+            }
+        except requests.HTTPError as e:
+            return {"success": False, "message": f"Generic connector {action_name} failed: {e}", "raw_response": {}}
+
+    def kill_process(self, host_id: str, process_id: str) -> dict:
+        payload = {"host_id": host_id, "process_id": process_id, "action": "kill_process"}
+        return self._post_action(payload, "kill_process")
+
+    def quarantine_file(self, host_id: str, file_path: str = None, file_hash: str = None) -> dict:
+        payload = {"host_id": host_id, "file_path": file_path, "file_hash": file_hash, "action": "quarantine_file"}
+        return self._post_action(payload, "quarantine_file")
+
+    def block_hash(self, file_hash: str) -> dict:
+        payload = {"file_hash": file_hash, "action": "block_hash"}
+        return self._post_action(payload, "block_hash")

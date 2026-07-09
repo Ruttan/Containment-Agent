@@ -39,6 +39,19 @@ class EmailNotifier:
             print(f"[Email] Failed to send: {e}")
             return False
 
+    ACTION_BUTTON_LABELS = {
+        "isolate": "✅ ISOLATE HOST",
+        "kill_process": "🛑 KILL PROCESS",
+        "quarantine_file": "🗂 QUARANTINE FILE",
+        "block_hash": "🚫 BLOCK HASH",
+    }
+    ACTION_BUTTON_COLORS = {
+        "isolate": "#27ae60",
+        "kill_process": "#e67e22",
+        "quarantine_file": "#8e44ad",
+        "block_hash": "#2c3e50",
+    }
+
     def send_approval_request(
         self,
         token: str,
@@ -46,7 +59,6 @@ class EmailNotifier:
         host_info: dict,
         public_url: str,
     ) -> bool:
-        approve_url = f"{public_url}/approve/{token}"
         deny_url = f"{public_url}/deny/{token}"
 
         severity = evaluation.get("severity", "unknown").upper()
@@ -58,12 +70,36 @@ class EmailNotifier:
         }
         color = severity_colors.get(severity, "#95a5a6")
 
-        subject = f"[{severity}] Host Isolation Approval Required — {host_info.get('hostname', 'Unknown')}"
+        subject = f"[{severity}] Containment Approval Required — {host_info.get('hostname', 'Unknown')}"
+
+        available_actions = evaluation.get("available_actions") or ["isolate"]
+        buttons_html = ""
+        for action in available_actions:
+            label = self.ACTION_BUTTON_LABELS.get(action, action.upper())
+            btn_color = self.ACTION_BUTTON_COLORS.get(action, "#27ae60")
+            action_url = f"{public_url}/approve/{token}/{action}"
+            buttons_html += f"""
+              <a href="{action_url}"
+                 style="background:{btn_color};color:white;padding:14px 24px;text-decoration:none;
+                        border-radius:4px;font-size:15px;font-weight:bold;margin:4px;display:inline-block;">
+                {label}
+              </a>
+            """
+
+        mitre = evaluation.get("mitre_technique")
+        mitre_row = ""
+        if mitre:
+            mitre_row = f"""
+              <tr style="background:#f9f9f9;">
+                <td style="padding:8px; font-weight:bold;">MITRE ATT&CK</td>
+                <td style="padding:8px;">{mitre}</td>
+              </tr>
+            """
 
         html = f"""
-        <html><body style="font-family: Arial, sans-serif; max-width: 600px; margin: auto;">
+        <html><body style="font-family: Arial, sans-serif; max-width: 640px; margin: auto;">
           <div style="background:{color}; color:white; padding:16px; border-radius:4px 4px 0 0;">
-            <h2 style="margin:0;">Host Isolation Approval Required</h2>
+            <h2 style="margin:0;">Containment Approval Required</h2>
             <p style="margin:4px 0 0;">Severity: {severity}</p>
           </div>
           <div style="border:1px solid #ddd; border-top:none; padding:20px; border-radius:0 0 4px 4px;">
@@ -84,25 +120,30 @@ class EmailNotifier:
                 <td style="padding:8px; font-weight:bold;">Threat</td>
                 <td style="padding:8px;">{evaluation.get('threat_name', 'Unknown')}</td>
               </tr>
+              {mitre_row}
               <tr>
                 <td style="padding:8px; font-weight:bold;">AI Confidence</td>
                 <td style="padding:8px;">{evaluation.get('confidence', 'Unknown').upper()}</td>
               </tr>
             </table>
-            <div style="background:#f0f4f8; padding:16px; border-radius:4px; margin-bottom:24px;">
-              <strong>AI Assessment:</strong><br>
+            <div style="background:#f0f4f8; padding:16px; border-radius:4px; margin-bottom:16px;">
+              <strong>Summary:</strong><br>
               {evaluation.get('summary', 'No summary available.')}
             </div>
+            <div style="background:#fffaf0; border-left:4px solid #e67e22; padding:16px; margin-bottom:16px;">
+              <strong>Why this alerted:</strong><br>
+              {evaluation.get('explanation', 'No detailed explanation available.')}
+            </div>
+            <div style="background:#eafaf1; border-left:4px solid #27ae60; padding:16px; margin-bottom:24px;">
+              <strong>Suggested fix:</strong><br>
+              {evaluation.get('suggested_fix', 'No specific remediation suggested.')}
+            </div>
             <div style="text-align:center;">
-              <a href="{approve_url}"
-                 style="background:#27ae60;color:white;padding:14px 32px;text-decoration:none;
-                        border-radius:4px;font-size:16px;font-weight:bold;margin-right:16px;">
-                ✅ APPROVE ISOLATION
-              </a>
+              {buttons_html}
               <a href="{deny_url}"
                  style="background:#c0392b;color:white;padding:14px 32px;text-decoration:none;
-                        border-radius:4px;font-size:16px;font-weight:bold;">
-                ❌ DENY
+                        border-radius:4px;font-size:15px;font-weight:bold;margin:4px;display:inline-block;">
+                ❌ DENY / NO ACTION
               </a>
             </div>
             <p style="color:#999;font-size:12px;text-align:center;margin-top:24px;">
@@ -113,17 +154,29 @@ class EmailNotifier:
         """
         return self._send(subject, html)
 
-    def send_result(self, host_info: dict, action: str, actor: str = "analyst") -> bool:
+    def send_result(self, host_info: dict, action: str, result: dict = None, actor: str = "analyst") -> bool:
         hostname = host_info.get("hostname", "Unknown")
-        if action == "isolated":
-            subject = f"[ISOLATED] {hostname} has been isolated"
-            body = f"<p><strong>{hostname}</strong> was successfully isolated from the network. Approved by {actor}.</p>"
-        elif action == "denied":
-            subject = f"[DENIED] Isolation of {hostname} was denied"
-            body = f"<p>Isolation of <strong>{hostname}</strong> was denied by {actor}. No action was taken.</p>"
+        action_labels = {
+            "isolate": "isolated",
+            "kill_process": "process terminated",
+            "quarantine_file": "file quarantined",
+            "block_hash": "hash blocked",
+        }
+        label = action_labels.get(action, action)
+        detail = f" ({result.get('message')})" if result else ""
+
+        if action == "denied":
+            subject = f"[DENIED] Containment request for {hostname} was denied"
+            body = f"<p>The containment request for <strong>{hostname}</strong> was denied by {actor}. No action was taken.</p>"
+        elif action == "expired":
+            subject = f"[EXPIRED] Containment approval for {hostname} expired"
+            body = f"<p>The containment approval request for <strong>{hostname}</strong> expired with no response.</p>"
+        elif result and not result.get("success"):
+            subject = f"[FAILED] {label} on {hostname} failed"
+            body = f"<p>Approval was granted to perform <strong>{label}</strong> on <strong>{hostname}</strong>, but it failed:{detail}</p>"
         else:
-            subject = f"[EXPIRED] Isolation approval for {hostname} expired"
-            body = f"<p>The isolation approval request for <strong>{hostname}</strong> expired with no response.</p>"
+            subject = f"[{label.upper()}] {hostname}"
+            body = f"<p><strong>{hostname}</strong>: {label} — approved by {actor}.{detail}</p>"
 
         html = f"<html><body style='font-family:Arial,sans-serif;'>{body}</body></html>"
         return self._send(subject, html)

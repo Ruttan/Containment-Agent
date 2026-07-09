@@ -101,3 +101,76 @@ class CrowdStrikeConnector(BaseConnector):
             }
         except Exception as e:
             return {"hostname": host_id, "ip_address": "unknown", "os": "unknown", "last_seen": str(e)}
+
+    # ------------------------------------------------------------------
+    # Optional response actions
+    # ------------------------------------------------------------------
+
+    def kill_process(self, host_id: str, process_id: str) -> dict:
+        """
+        Kills a process via a Real Time Response (RTR) active-responder
+        session command. Requires an RTR session to be initialized first.
+        NOTE: not live-tested — verify session-init flow against current
+        Falcon RTR API docs before relying on this in production.
+        """
+        try:
+            init_resp = requests.post(
+                f"{self.base_url}/real-time-response/entities/sessions/v1",
+                json={"device_id": host_id},
+                headers=self._headers(),
+            )
+            init_resp.raise_for_status()
+            session_id = init_resp.json()["resources"][0]["session_id"]
+
+            cmd_resp = requests.post(
+                f"{self.base_url}/real-time-response/entities/active-responder-command/v1",
+                json={
+                    "base_command": "kill",
+                    "command_string": f"kill {process_id}",
+                    "session_id": session_id,
+                },
+                headers=self._headers(),
+            )
+            cmd_resp.raise_for_status()
+            return {
+                "success": True,
+                "message": f"Kill command sent for process {process_id} on {host_id} via CrowdStrike RTR.",
+                "raw_response": cmd_resp.json() if cmd_resp.content else {},
+            }
+        except Exception as e:
+            return {"success": False, "message": f"CrowdStrike kill_process failed: {e}", "raw_response": {}}
+
+    def block_hash(self, file_hash: str) -> dict:
+        """
+        Adds a custom IOC (indicator of compromise) to block the given hash
+        org-wide via the Falcon IOC management API.
+        """
+        url = f"{self.base_url}/iocs/entities/indicators/v1"
+        payload = {
+            "indicators": [
+                {
+                    "type": "sha256" if len(file_hash) == 64 else "md5",
+                    "value": file_hash,
+                    "action": "prevent",
+                    "platforms": ["windows", "mac", "linux"],
+                    "description": "Blocked via Containment Agent",
+                }
+            ]
+        }
+        try:
+            resp = requests.post(url, json=payload, headers=self._headers())
+            resp.raise_for_status()
+            return {
+                "success": True,
+                "message": f"Hash {file_hash} added to CrowdStrike IOC block list.",
+                "raw_response": resp.json() if resp.content else {},
+            }
+        except requests.HTTPError as e:
+            return {
+                "success": False,
+                "message": f"CrowdStrike block_hash failed: {e}",
+                "raw_response": getattr(e.response, "json", lambda: {})(),
+            }
+
+    # quarantine_file: CrowdStrike Falcon has no direct file-quarantine action
+    # analogous to Defender's — falls back to BaseConnector's "not supported".

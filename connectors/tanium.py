@@ -67,3 +67,66 @@ class TaniumConnector(BaseConnector):
             }
         except Exception as e:
             return {"hostname": host_id, "ip_address": "unknown", "os": "unknown", "last_seen": str(e)}
+
+    # ------------------------------------------------------------------
+    # Optional response actions
+    # NOTE: not live-tested — verify these Threat Response endpoints
+    # against your Tanium module version before relying on them.
+    # ------------------------------------------------------------------
+
+    def kill_process(self, host_id: str, process_id: str) -> dict:
+        """Kills a process on the endpoint via Threat Response intervention."""
+        url = f"{self.base_url}/api/v2/threat-response/actions/kill-process"
+        payload = {"computer_id": host_id, "pid": process_id}
+        try:
+            resp = requests.post(url, json=payload, headers=self._headers(), verify=False)
+            resp.raise_for_status()
+            return {
+                "success": True,
+                "message": f"Process {process_id} kill requested on {host_id} via Tanium.",
+                "raw_response": resp.json() if resp.content else {},
+            }
+        except requests.HTTPError as e:
+            return {
+                "success": False,
+                "message": f"Tanium kill_process failed: {e}",
+                "raw_response": getattr(e.response, "json", lambda: {})(),
+            }
+
+    def quarantine_file(self, host_id: str, file_path: str = None, file_hash: str = None) -> dict:
+        """Quarantines a file on the endpoint via Threat Response."""
+        url = f"{self.base_url}/api/v2/threat-response/actions/quarantine-file"
+        payload = {"computer_id": host_id, "file_path": file_path, "hash": file_hash}
+        try:
+            resp = requests.post(url, json=payload, headers=self._headers(), verify=False)
+            resp.raise_for_status()
+            return {
+                "success": True,
+                "message": f"File quarantine requested on {host_id} via Tanium.",
+                "raw_response": resp.json() if resp.content else {},
+            }
+        except requests.HTTPError as e:
+            return {
+                "success": False,
+                "message": f"Tanium quarantine_file failed: {e}",
+                "raw_response": getattr(e.response, "json", lambda: {})(),
+            }
+
+    def block_hash(self, file_hash: str) -> dict:
+        """Adds a hash to the Tanium reputation blocklist (org-wide)."""
+        url = f"{self.base_url}/api/v2/threat-response/reputation/blocklist"
+        payload = {"hash": file_hash}
+        try:
+            resp = requests.post(url, json=payload, headers=self._headers(), verify=False)
+            resp.raise_for_status()
+            return {
+                "success": True,
+                "message": f"Hash {file_hash} added to Tanium blocklist.",
+                "raw_response": resp.json() if resp.content else {},
+            }
+        except requests.HTTPError as e:
+            return {
+                "success": False,
+                "message": f"Tanium block_hash failed: {e}",
+                "raw_response": getattr(e.response, "json", lambda: {})(),
+            }
