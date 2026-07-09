@@ -111,11 +111,40 @@ containment-agent/
 │   ├── tanium.py             # Tanium Threat Response adapter. API token auth.
 │   └── generic.py            # Fallback adapter. POSTs to any configurable endpoint.
 │
-└── notifiers/
+├── notifiers/
+│   ├── __init__.py
+│   ├── slack_notifier.py     # Slack Incoming Webhook. Sends Block Kit approval card.
+│   └── email_notifier.py     # SMTP email. Sends HTML approval email with buttons.
+│
+├── integrations/
+│   ├── __init__.py
+│   └── siem_forwarder.py     # Optional audit-trail export to Splunk HEC and/or a
+│                             # generic JSON webhook (any other SIEM). Forwards every
+│                             # alert evaluation and outcome. Failures here are logged,
+│                             # never raised — a down SIEM must never block containment.
+│
+└── vault/
     ├── __init__.py
-    ├── slack_notifier.py     # Slack Incoming Webhook. Sends Block Kit approval card.
-    └── email_notifier.py     # SMTP email. Sends HTML approval email with buttons.
+    ├── base.py                # SecretsProvider interface: get(name) -> str
+    ├── factory.py             # Builds whichever backend config.yaml's secrets_provider selects
+    ├── resolver.py            # THE ENFORCEMENT POINT — whitelist of config paths treated as
+    │                          # secrets (SECRET_FIELD_PATHS). Resolves each from a reference
+    │                          # name to its real value once, at config load time.
+    ├── azure_keyvault.py      # Azure Key Vault backend — DefaultAzureCredential auth,
+    │                          # never a stored credential (env vars / Managed Identity / az login)
+    └── keepass_provider.py    # KeePass backend — reads entries from a .kdbx by title.
+                               # Master password: env var or interactive prompt only, never config.yaml.
 ```
+
+**No plaintext secrets in `config.yaml`.** Every credential field (Anthropic
+key, platform client secrets, Slack webhook URL, SMTP password, SIEM
+tokens) holds a *reference name*, not a real value — see
+`vault/resolver.py`'s `SECRET_FIELD_PATHS` for the exact list. The real
+value only exists in Azure Key Vault or a KeePass database. `load_config()`
+in `agent.py` resolves every one of these at startup before anything else
+touches the config. There is no code path that accepts a literal secret in
+these fields — pasting one in will just fail to resolve (the backend won't
+have an entry by that literal name).
 
 ---
 
@@ -214,23 +243,38 @@ pending_approvals: dict[str, dict] = {
 
 | Key | Type | Description |
 |-----|------|-------------|
+| `secrets_provider` | string | `azure_keyvault` or `keepass` — which backend resolves reference names below |
+| `secrets_backends.azure_keyvault.vault_url` | string | Key Vault base URL |
+| `secrets_backends.keepass.database_path` | string | Path to your `.kdbx` file |
+| `secrets_backends.keepass.keyfile_path` | string | Optional key file path |
 | `sources.<name>.connector` | string | Which connector handles this source: `defender`, `crowdstrike`, `tanium`, or `generic`. Source name becomes the webhook path `/webhook/alert/<name>`. Multiple sources can be active at once. |
 | `platform` | string | Legacy single-connector mode (used only if `sources` is absent). |
-| `anthropic_api_key` | string | Anthropic API key for alert evaluation |
-| `platforms.defender.tenant_id` | string | Azure AD tenant ID |
-| `platforms.defender.client_id` | string | Azure AD app registration client ID |
-| `platforms.defender.client_secret` | string | Azure AD app registration client secret |
-| `platforms.crowdstrike.client_id` | string | CrowdStrike OAuth2 client ID |
-| `platforms.crowdstrike.client_secret` | string | CrowdStrike OAuth2 client secret |
+| `anthropic_api_key` | string (**reference name**) | Points at the real Anthropic API key in your vault |
+| `platforms.defender.tenant_id` | string | Azure AD tenant ID (plain — not treated as a secret) |
+| `platforms.defender.client_id` | string | Azure AD app registration client ID (plain) |
+| `platforms.defender.client_secret` | string (**reference name**) | Azure AD app registration client secret |
+| `platforms.crowdstrike.client_id` | string | CrowdStrike OAuth2 client ID (plain) |
+| `platforms.crowdstrike.client_secret` | string (**reference name**) | CrowdStrike OAuth2 client secret |
 | `platforms.crowdstrike.base_url` | string | CrowdStrike API base URL |
-| `platforms.tanium.api_token` | string | Tanium API session token |
+| `platforms.tanium.api_token` | string (**reference name**) | Tanium API session token |
 | `platforms.tanium.base_url` | string | Tanium server base URL |
 | `platforms.generic.isolation_endpoint` | string | URL to POST isolation/response requests to |
-| `notifications.slack.webhook_url` | string | Slack Incoming Webhook URL |
+| `platforms.generic.api_key` | string (**reference name**) | Generic connector's API key |
+| `notifications.slack.webhook_url` | string (**reference name**) | Slack Incoming Webhook URL — treated as a secret since it grants posting capability |
+| `notifications.email.password` | string (**reference name**) | SMTP password / app password |
+| `integrations.siem.splunk_hec.enabled` | bool | Forward every alert/evaluation/outcome to Splunk via HTTP Event Collector |
+| `integrations.siem.splunk_hec.url` | string | Splunk HEC base URL (e.g. `https://splunk.example.com:8088`) |
+| `integrations.siem.splunk_hec.token` | string (**reference name**) | Splunk HEC token |
+| `integrations.siem.generic_webhook.enabled` | bool | Forward every alert/evaluation/outcome to any JSON-accepting SIEM endpoint |
+| `integrations.siem.generic_webhook.url` | string | Destination URL for the generic SIEM webhook |
+| `integrations.siem.generic_webhook.headers.<name>` | string (**reference name**) | Each header value (e.g. an Authorization token) is also resolved through the vault |
+
+Fields marked **reference name** never hold the real value — see "No
+plaintext secrets" above. Everything else is a plain, non-sensitive value.
+
 | `notifications.email.smtp_host` | string | SMTP server hostname |
 | `notifications.email.smtp_port` | int | SMTP port (typically 587) |
-| `notifications.email.username` | string | SMTP login username |
-| `notifications.email.password` | string | SMTP password or app password |
+| `notifications.email.username` | string | SMTP login username (plain) |
 | `notifications.email.to_addresses` | list | List of recipient email addresses |
 | `server.host` | string | Bind address (default `0.0.0.0`) |
 | `server.port` | int | Port (default `5000`) |
@@ -260,7 +304,9 @@ pending_approvals: dict[str, dict] = {
 If you are an AI engine working in this codebase:
 
 **Do:**
-- Read `config.example.yaml` to understand configuration shape. Never read or write `config.yaml` (it contains real credentials).
+- Read `config.example.yaml` to understand configuration shape. Never read or write `config.yaml` — even though it no longer holds real secret values directly, it still reflects the user's specific vault/KeePass setup and reference-name conventions.
+- If you add a new connector/notifier/integration with its own credential, add its config path to `SECRET_FIELD_PATHS` in `vault/resolver.py` — otherwise that field would accept (and silently pass through) a literal plaintext secret, defeating the whole point of this package.
+- Never name a new top-level package `secrets` — it shadows Python's standard library `secrets` module for any code run from this project's directory, including inside dependencies. This project's equivalent package is deliberately named `vault/`.
 - To add a new platform: create `connectors/<platform>.py`, inherit `BaseConnector`, implement `isolate_host()`/`get_host_info()` (and any of `kill_process()`/`quarantine_file()`/`block_hash()` the platform supports), register it in `CONNECTOR_CLASSES` in `agent.py`, and add a `sources.<name>` + `platforms.<name>` block to `config.example.yaml`.
 - To add a new notifier: create `notifiers/<name>_notifier.py` with `send_approval_request()` and `send_result()` methods (note `send_result` now takes `(host_info, action, result=None, actor="analyst")`). Wire it into `agent.py` alongside the existing notifiers.
 - Use the `evaluator.py` prompt template as the single source of truth for what the AI is asked to do. If requirements change, modify the prompt there. `available_actions` should only ever include actions the alert data can actually support — that filtering happens both in the prompt and defensively in `evaluate()`.
@@ -282,7 +328,8 @@ If you are an AI engine working in this codebase:
 - [ ] Multi-host alert handling (batch isolation)
 - [ ] Microsoft Teams notifier
 - [ ] PagerDuty notifier
-- [ ] Audit export (CSV / SIEM forwarding)
 - [ ] Web UI for the `/status` endpoint
 - [ ] Live-test the Defender connector against a real Graph Security API tenant (endpoints in `connectors/defender.py` are best-effort/unverified, same caveat as CrowdStrike/Tanium)
 - [ ] Live-test the new kill_process/quarantine_file/block_hash methods added to CrowdStrike and Tanium connectors
+- [x] Audit export (CSV / SIEM forwarding) — done via `integrations/siem_forwarder.py`: Splunk HEC + generic webhook, forwards raw alert + evaluation + outcome for every alert. Not yet live-tested against a real Splunk HEC endpoint.
+- [x] Secrets management — done via `vault/`: Azure Key Vault + KeePass backends, config.yaml holds only reference names. Not yet live-tested against a real Key Vault or KeePass database — verify both paths end to end before relying on this.

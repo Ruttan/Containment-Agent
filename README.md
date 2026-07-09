@@ -46,11 +46,12 @@ copy config.example.yaml config.yaml
 
 Open `config.yaml` and fill in:
 
+- `secrets_provider` and `secrets_backends` — pick `azure_keyvault` or `keepass` and configure it. **This has to be done first** — every credential field below is a reference name, not a real value, and won't resolve until your vault/database actually has the matching entries. See "Secrets Management" further down for the full setup.
 - `sources` — enable one entry per alert source you want active (e.g. `defender_endpoint`, `m365_defender`, `crowdstrike`, `tanium`). Each source name becomes its own webhook path.
-- `anthropic_api_key` — from https://console.anthropic.com
-- Your platform credentials under `platforms` (only the sections matching the sources you enabled — e.g. `platforms.defender` needs an Azure AD app registration's `tenant_id`/`client_id`/`client_secret`)
-- Slack webhook URL — from https://api.slack.com/messaging/webhooks
-- Email settings — use a Gmail App Password if using Gmail
+- `anthropic_api_key` — store your real key (from https://console.anthropic.com) in your vault under the reference name shown in the config
+- Your platform credentials under `platforms` (only the sections matching the sources you enabled)
+- Slack webhook URL and email settings — same deal, real values live in the vault, config.yaml just has the reference names
+- (Optional) `integrations.siem` — enable `splunk_hec` and/or `generic_webhook` to forward a full audit trail (alert, evaluation, outcome) to your SIEM
 
 ### 4. Run the agent
 
@@ -149,10 +150,66 @@ containment-agent/
 │   ├── crowdstrike.py    # CrowdStrike adapter
 │   ├── tanium.py         # Tanium adapter
 │   └── generic.py        # Custom platform adapter
-└── notifiers/
-    ├── email_notifier.py  # Email via SMTP
-    └── slack_notifier.py  # Slack via webhook
+├── notifiers/
+│   ├── email_notifier.py  # Email via SMTP
+│   └── slack_notifier.py  # Slack via webhook
+├── integrations/
+│   └── siem_forwarder.py  # Optional: forwards alert + evaluation + outcome to Splunk HEC / a generic SIEM webhook
+└── vault/
+    ├── base.py             # SecretsProvider interface
+    ├── factory.py          # Builds whichever backend is configured
+    ├── resolver.py         # Resolves every credential field from a reference name to its real value
+    ├── azure_keyvault.py   # Azure Key Vault backend
+    └── keepass_provider.py # KeePass backend
 ```
+
+## Secrets Management
+
+`config.yaml` never holds a real credential. Every secret field is a *reference name* — the real value lives in either Azure Key Vault or a KeePass database, and the agent resolves it at startup. If you paste an actual API key into one of those fields instead of a reference name, the agent will fail to start with a clear error, since there's no code path that accepts a literal secret there.
+
+### Option A — Azure Key Vault (recommended for team/production use)
+
+1. Create a vault and add your secrets:
+   ```bash
+   az keyvault create --name your-vault-name --resource-group your-rg
+   az keyvault secret set --vault-name your-vault-name --name anthropic-api-key --value sk-ant-...
+   az keyvault secret set --vault-name your-vault-name --name crowdstrike-client-secret --value ...
+   # repeat for every reference name shown in config.example.yaml
+   ```
+2. Grant your identity access — the **Key Vault Secrets User** role (get-only) is enough. If you're running this agent on Azure infrastructure (App Service, a VM, a container), assign it a **Managed Identity** and grant that identity access — no credential of any kind needs to exist anywhere in that case. For local development, `az login` works fine.
+3. In `config.yaml`:
+   ```yaml
+   secrets_provider: "azure_keyvault"
+   secrets_backends:
+     azure_keyvault:
+       vault_url: "https://your-vault-name.vault.azure.net/"
+   ```
+
+### Option B — KeePass
+
+1. Open your `.kdbx` database and add one entry per credential. The entry's **Title** must exactly match the reference name shown in `config.example.yaml` (e.g. `anthropic-api-key`), and the real secret goes in that entry's **Password** field.
+2. In `config.yaml`:
+   ```yaml
+   secrets_provider: "keepass"
+   secrets_backends:
+     keepass:
+       database_path: "C:/path/to/your/vault.kdbx"
+       keyfile_path: null   # only if your database uses one
+   ```
+3. The one credential that can't be eliminated is the database's own master password (inherent to KeePass, not something this integration can design around). The agent will prompt for it interactively at startup — nothing is logged or written to disk. If you need the agent to start unattended (e.g. as a background service), set the `KEEPASS_MASTER_PASSWORD` environment variable instead of typing it each time.
+
+Neither backend has been live-tested end to end yet in this project — verify both the Key Vault and KeePass paths work in your environment before relying on them.
+
+## Forwarding to Splunk or Another SIEM
+
+Enable it in `config.yaml` under `integrations.siem` — see `config.example.yaml` for the full block. Two independent destinations:
+
+- **`splunk_hec`** — native Splunk HTTP Event Collector support. Create a HEC token in Splunk under *Settings > Data Inputs > HTTP Event Collector*, then set `url` and `token`.
+- **`generic_webhook`** — a plain JSON POST to any URL, for QRadar, Sentinel, LogRhythm, Elastic, or a syslog-forwarder shim. Add an `Authorization` header under `headers` if the destination needs one.
+
+Every alert this agent evaluates gets forwarded — including ones below the notification threshold (`event_type: "alert_evaluated"`) — plus the full lifecycle once a notification does go out (`approval_requested` → `action_result` / `denied` / `expired`). Each event includes the raw alert, Claude's full evaluation (severity, explanation, suggested fix, available actions), and the outcome. A SIEM being unreachable never blocks the actual containment workflow — forwarding failures are logged and swallowed.
+
+This hasn't been live-tested against a real Splunk HEC endpoint yet — verify the HEC URL/token work in your environment before relying on it.
 
 ## Adding a New Platform
 
@@ -173,4 +230,3 @@ containment-agent/
 | GET | `/approve/<token>/<action>` | Executes the chosen action: `isolate`, `kill_process`, `quarantine_file`, or `block_hash` (linked in email/Slack) |
 | GET | `/deny/<token>` | Denies the request — no action taken (linked in email/Slack) |
 | GET | `/status` | Lists all approval requests, their available/taken actions, and status |
-

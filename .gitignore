@@ -3,6 +3,10 @@
 # -----------------------------------------------
 config.yaml
 
+# Stray leftover from an in-session rename (empty, harmless, couldn't be
+# deleted due to a host filesystem lock) — excluded rather than committed.
+secrets_unused/
+
 # -----------------------------------------------
 # Runtime artifacts
 # -----------------------------------------------

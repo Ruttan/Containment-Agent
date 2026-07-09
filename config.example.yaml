@@ -1,11 +1,63 @@
 # ============================================================
 # Containment Agent Configuration
 # Fill in your values below. Lines starting with # are comments.
+#
+# IMPORTANT — SECRETS MANAGEMENT:
+# This file never holds a real credential value. Every field that used to
+# be a plaintext secret is now a REFERENCE NAME — a lookup key that the
+# agent resolves through whichever secrets backend you configure below
+# (Azure Key Vault or KeePass). The real secret only ever lives inside that
+# backend. If you paste an actual API key/password into one of those
+# fields instead of a reference name, the agent will fail to start with a
+# clear "secret not found" error — there is no code path that accepts a
+# literal secret here. See vault/resolver.py for the exact list of fields
+# this applies to.
 # ============================================================
 
-# Your Anthropic API key (used for AI alert evaluation).
-# Get one at: https://console.anthropic.com
-anthropic_api_key: "YOUR_ANTHROPIC_API_KEY"
+# ------------------------------------------------------------
+# SECRETS BACKEND — pick exactly one.
+# ------------------------------------------------------------
+secrets_provider: "azure_keyvault"   # or "keepass"
+
+secrets_backends:
+
+  azure_keyvault:
+    # Base URL of your Key Vault.
+    vault_url: "https://your-vault-name.vault.azure.net/"
+    # Authentication is handled by DefaultAzureCredential — never a
+    # credential in this file. It tries, in order: environment variables
+    # (AZURE_CLIENT_ID/AZURE_CLIENT_SECRET/AZURE_TENANT_ID, if you've set up
+    # a service principal that way), a Managed Identity (recommended if this
+    # agent runs on Azure infrastructure — requires zero stored credentials),
+    # or an interactive `az login` session (fine for local development).
+    #
+    # Setup:
+    #   az keyvault create --name your-vault-name --resource-group your-rg
+    #   az keyvault secret set --vault-name your-vault-name --name anthropic-api-key --value sk-ant-...
+    #   (repeat for each reference name used below)
+    # Then grant your agent's identity "Key Vault Secrets User" (get-only).
+
+  keepass:
+    # Path to your .kdbx database.
+    database_path: "C:/path/to/your/vault.kdbx"
+    # Optional — only if your database uses a key file in addition to (or
+    # instead of) a master password.
+    keyfile_path: null
+    #
+    # The master password itself is NEVER put in this file (that would just
+    # move the hardcoding problem, not solve it). The agent will:
+    #   - read it from the KEEPASS_MASTER_PASSWORD environment variable if set
+    #     (useful for running the agent unattended/as a service), or
+    #   - prompt for it interactively at startup otherwise.
+    #
+    # Setup: open the database in KeePass, add one entry per credential
+    # below, titled with the exact reference name shown in comments (e.g.
+    # "anthropic-api-key"), with the real value in that entry's Password field.
+
+# Your Anthropic API key reference name (used for AI alert evaluation).
+# Get the real key at: https://console.anthropic.com
+# Store it in your vault under this name, then reference it here:
+anthropic_api_key: "anthropic-api-key"
 
 # ============================================================
 # ALERT SOURCES (multi-source, configurable)
@@ -40,6 +92,9 @@ sources:
 # ============================================================
 # PLATFORM CREDENTIALS
 # Fill in credentials only for the platforms you enabled above under `sources`.
+# Non-secret fields (base_url, tenant_id, client_id) stay as plain values —
+# they're identifiers, not secrets, and aren't exploitable alone. Only the
+# fields marked "reference name" below get resolved through your vault.
 # ============================================================
 
 platforms:
@@ -51,18 +106,17 @@ platforms:
     # connectors/defender.py for the specific permission names.
     tenant_id: "YOUR_AZURE_TENANT_ID"
     client_id: "YOUR_APP_REGISTRATION_CLIENT_ID"
-    client_secret: "YOUR_APP_REGISTRATION_CLIENT_SECRET"
+    client_secret: "defender-client-secret"   # reference name — store the real secret in your vault
 
   crowdstrike:
-    # OAuth2 credentials from your CrowdStrike API client
+    # Client ID is an identifier, not a secret — stays plain.
     client_id: "YOUR_CS_CLIENT_ID"
-    client_secret: "YOUR_CS_CLIENT_SECRET"
+    client_secret: "crowdstrike-client-secret"   # reference name
     # Your CrowdStrike API base URL (region-specific)
     base_url: "https://api.crowdstrike.com"
 
   tanium:
-    # API token from your Tanium console (Settings > API Tokens)
-    api_token: "YOUR_TANIUM_API_TOKEN"
+    api_token: "tanium-api-token"   # reference name
     # Your Tanium server URL
     base_url: "https://your-tanium-server.example.com"
 
@@ -71,7 +125,7 @@ platforms:
     # {"host_id": "...", "action": "isolate"} (and similar payloads for
     # kill_process / quarantine_file / block_hash — see connectors/generic.py)
     isolation_endpoint: "https://your-platform/api/isolate"
-    api_key: "YOUR_API_KEY"
+    api_key: "generic-connector-api-key"   # reference name
     api_key_header: "Authorization"
 
 # ============================================================
@@ -82,22 +136,56 @@ platforms:
 notifications:
 
   slack:
-    # Slack incoming webhook URL.
-    # Create one at: https://api.slack.com/messaging/webhooks
-    webhook_url: "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
+    # Reference name — the webhook URL itself grants posting capability, so
+    # it's treated as a secret. Create the real one at:
+    # https://api.slack.com/messaging/webhooks
+    webhook_url: "slack-webhook-url"
 
   email:
     smtp_host: "smtp.gmail.com"
     smtp_port: 587
-    # Your sending email address
+    # Your sending email address — not a secret, stays plain.
     username: "your-email@gmail.com"
-    # For Gmail, use an App Password — not your real password.
+    # Reference name. For Gmail, store an App Password (not your real
+    # password) under this name in your vault.
     # Create one at: myaccount.google.com/apppasswords
-    password: "YOUR_APP_PASSWORD"
+    password: "smtp-password"
     from_address: "your-email@gmail.com"
     # List of recipients (can be more than one)
     to_addresses:
       - "analyst@yourcompany.com"
+
+# ============================================================
+# SIEM / AUDIT FORWARDING (optional)
+# Forwards a full audit trail of every alert this agent handles — the raw
+# alert, Claude's evaluation, and the eventual outcome — to your SIEM.
+# Either or both destinations can be enabled at once.
+# ============================================================
+
+integrations:
+  siem:
+    splunk_hec:
+      enabled: false
+      # Base URL of your Splunk HEC listener (commonly port 8088)
+      url: "https://your-splunk-instance.example.com:8088"
+      # Reference name. Create the real HEC token at:
+      # Settings > Data Inputs > HTTP Event Collector
+      token: "splunk-hec-token"
+      # Optional — omit to use Splunk's default index
+      index: "security"
+      sourcetype: "containment_agent"
+      # Set to false only if your HEC endpoint uses a self-signed cert
+      verify_ssl: true
+
+    generic_webhook:
+      enabled: false
+      # Any HTTPS endpoint that accepts a JSON POST — QRadar, Sentinel,
+      # LogRhythm, Elastic, a syslog-forwarder shim, etc.
+      url: "https://your-siem.example.com/api/ingest"
+      headers:
+        # Each header value here is also a reference name, resolved the
+        # same way as the fields above.
+        Authorization: "siem-webhook-auth-header"
 
 # ============================================================
 # SERVER SETTINGS

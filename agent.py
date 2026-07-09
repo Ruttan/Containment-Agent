@@ -32,6 +32,9 @@ from connectors.crowdstrike import CrowdStrikeConnector
 from connectors.tanium import TaniumConnector
 from connectors.generic import GenericConnector
 from connectors.defender import DefenderConnector
+from integrations.siem_forwarder import SIEMForwarder
+from vault.factory import build_secrets_provider
+from vault.resolver import resolve_secrets
 
 
 CONNECTOR_CLASSES = {
@@ -49,8 +52,19 @@ VALID_ACTIONS = ("isolate", "kill_process", "quarantine_file", "block_hash")
 # -----------------------------------------------------------------------
 
 def load_config(path: str = "config.yaml") -> dict:
+    """
+    Loads config.yaml, then resolves every credential field through the
+    configured secrets backend (Azure Key Vault or KeePass). config.yaml
+    itself never holds a real secret value after this point — only
+    reference names, which get swapped for the real thing here, once, at
+    startup. See vault/resolver.py for exactly which fields are treated as
+    secrets and vault/factory.py for backend selection.
+    """
     with open(path) as f:
-        return yaml.safe_load(f)
+        raw_config = yaml.safe_load(f)
+
+    provider = build_secrets_provider(raw_config)
+    return resolve_secrets(raw_config, provider)
 
 
 def build_connectors(config: dict) -> dict:
@@ -114,6 +128,7 @@ DEFAULT_SOURCE = None
 EVALUATOR = None
 SLACK = None
 EMAIL = None
+SIEM = None
 
 
 def _get_connector_for_source(source: str):
@@ -158,6 +173,14 @@ def receive_alert(source: str = None):
     # Step 2: Check if we should notify
     if not EVALUATOR.should_notify(evaluation):
         logging.info("Alert below notification threshold — logged only.")
+        SIEM.forward(
+            event_type="alert_evaluated",
+            token=None,
+            source=source,
+            evaluation=evaluation,
+            host_info=None,
+            status="logged",
+        )
         return jsonify({
             "status": "logged",
             "message": "Alert did not meet notification threshold.",
@@ -186,6 +209,15 @@ def receive_alert(source: str = None):
     email_ok = EMAIL.send_approval_request(token, evaluation, host_info, public_url)
 
     logging.info(f"Approval request sent — token={token}, slack={slack_ok}, email={email_ok}")
+
+    SIEM.forward(
+        event_type="approval_requested",
+        token=token,
+        source=source,
+        evaluation=evaluation,
+        host_info=host_info,
+        status="pending",
+    )
 
     return jsonify({
         "status": "approval_requested",
@@ -244,6 +276,17 @@ def approve(token: str, action: str = "isolate"):
     SLACK.send_result(host_info, action, result)
     EMAIL.send_result(host_info, action, result)
 
+    SIEM.forward(
+        event_type="action_result",
+        token=token,
+        source=entry.get("source"),
+        evaluation=evaluation,
+        host_info=host_info,
+        status="approved",
+        action_taken=action,
+        result=result,
+    )
+
     label = ACTION_LABELS.get(action, action)
     if result["success"]:
         return f"""
@@ -279,6 +322,15 @@ def deny(token: str):
 
     SLACK.send_result(host_info, "denied")
     EMAIL.send_result(host_info, "denied")
+
+    SIEM.forward(
+        event_type="denied",
+        token=token,
+        source=entry.get("source"),
+        evaluation=entry["evaluation"],
+        host_info=host_info,
+        status="denied",
+    )
 
     return f"""
     <html><body style="font-family:Arial;max-width:500px;margin:80px auto;text-align:center;">
@@ -329,6 +381,14 @@ def expiry_worker(timeout_minutes: int):
                     logging.info(f"Approval expired — token={token}, host={entry['host_info'].get('hostname')}")
                     SLACK.send_result(entry["host_info"], "expired")
                     EMAIL.send_result(entry["host_info"], "expired")
+                    SIEM.forward(
+                        event_type="expired",
+                        token=token,
+                        source=entry.get("source"),
+                        evaluation=entry["evaluation"],
+                        host_info=entry["host_info"],
+                        status="expired",
+                    )
 
 
 # -----------------------------------------------------------------------
@@ -348,6 +408,7 @@ if __name__ == "__main__":
     EVALUATOR = AlertEvaluator(CONFIG)
     SLACK = SlackNotifier(CONFIG)
     EMAIL = EmailNotifier(CONFIG)
+    SIEM = SIEMForwarder(CONFIG)
 
     timeout = CONFIG.get("agent", {}).get("approval_timeout_minutes", 30)
     t = threading.Thread(target=expiry_worker, args=(timeout,), daemon=True)
